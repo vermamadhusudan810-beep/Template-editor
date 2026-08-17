@@ -1,0 +1,2502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Visual Template Mapper &amp; Document Generator</title>
+
+<!-- External dependencies. All three are optional at runtime: the page checks
+     for each before use and degrades with a clear message rather than throwing.
+     html2pdf.bundle already contains html2canvas + jsPDF; html2canvas is also
+     loaded on its own so PNG export survives a failure of the bundle. -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/html2pdf.js@0.10.1/dist/html2pdf.bundle.min.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+
+  /* Replaced elements carry an intrinsic width that ignores their container,
+     so they are clamped globally rather than case by case. */
+  img, canvas, svg, video { max-width: 100%; }
+
+  :root {
+    --bg: #eceff5;
+    --panel: #ffffff;
+    --ink: #1a2333;
+    --muted: #68748a;
+    --line: #dce2ec;
+    --accent: #3d6bff;
+    --accent-dark: #2a51d8;
+    --good: #0f8a58;
+    --bad: #c0392b;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(26,35,51,.05), 0 8px 26px rgba(26,35,51,.08);
+  }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ---------- Top bar ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    padding: 11px 20px;
+    position: sticky; top: 0; z-index: 30;
+  }
+  .topbar > div { min-width: 0; }
+  .topbar h1 { margin: 0; font-size: 1rem; letter-spacing: -.01em; }
+  .topbar .sub { color: var(--muted); font-size: .77rem; }
+
+  .modes {
+    margin-left: auto; display: flex; flex: 0 0 auto;
+    background: #eef1f7; border-radius: 999px; padding: 3px; max-width: 100%;
+  }
+  .modes button {
+    border: 0; background: transparent; font: inherit; font-weight: 600;
+    padding: 7px 18px; border-radius: 999px; cursor: pointer; color: var(--muted);
+  }
+  .modes button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 3px rgba(26,35,51,.14); }
+
+  /* ---------- Layout ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 350px;
+    gap: 18px;
+    padding: 18px 20px 48px;
+    align-items: start;
+    max-width: 1560px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .layout[hidden] { display: none; }
+
+  /* Grid and flex children default to min-width:auto, which refuses to shrink
+     below their content and is what pushes a fixed-width input or a long
+     button label past the edge of the page. Every direct child of the layout
+     opts out of that here, once. */
+  .layout > * { min-width: 0; max-width: 100%; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;          /* nothing inside a card may paint past its corners */
+  }
+  .card + .card { margin-top: 15px; }
+  .card h2 {
+    margin: 0; padding: 11px 14px;
+    font-size: .72rem; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted); border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card h2 .n { margin-left: auto; font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .card .body { padding: 14px; }
+
+  /* ---------- Stage ---------- */
+  .stage-wrap {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 14px;
+    max-width: 100%;
+    min-width: 0;
+    /* Panning rather than page-breaking: a high-resolution background scrolls
+       inside this box, so overlay coordinates stay pinned to the image instead
+       of being reflowed by the viewport. */
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+  }
+  .stage {
+    position: relative;
+    margin: 0 auto;
+    background: #fff;
+    line-height: 0;
+    user-select: none;
+    -webkit-user-select: none;
+    max-width: 100%;
+  }
+  .stage img.bg { display: block; width: 100%; height: auto; }
+  .stage.drawing { cursor: crosshair; }
+
+  .placeholder {
+    display: grid; place-items: center;
+    min-height: 430px;
+    border: 2px dashed var(--line);
+    border-radius: var(--radius);
+    color: var(--muted); text-align: center; padding: 30px; line-height: 1.6;
+  }
+  .placeholder strong { display: block; color: var(--ink); font-size: 1rem; margin-bottom: 6px; }
+
+  /* ---------- Overlay fields ----------
+     The box itself must never clip: the resize grip and the label tag sit
+     outside its bounds on purpose. Clipping happens on the inner layer. */
+  .fbox { position: absolute; padding: 0; }
+
+  .fbox .txt {
+    display: block; width: 100%; height: 100%;
+    overflow: hidden; line-height: 1.25;
+    white-space: pre-wrap; word-break: break-word;
+  }
+
+  .fbox .mask {
+    display: block; width: 100%; height: 100%;
+    overflow: hidden;
+    background: transparent;
+  }
+  .fbox .mask img { display: block; width: 100%; height: 100%; }
+
+  .fbox .maskhint {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+    font: 600 11px/1.3 system-ui, sans-serif;
+    color: rgba(61,107,255,.85);
+    background: rgba(61,107,255,.10);
+    text-align: center; padding: 4px;
+  }
+
+  .stage.guides .fbox { outline: 1px dashed rgba(61,107,255,.8); outline-offset: 0; }
+  .stage.guides .fbox.img-field { outline-color: rgba(214,88,196,.9); }
+
+  .editor-stage .fbox { cursor: move; }
+  .editor-stage .fbox.sel { outline: 2px solid var(--accent) !important; z-index: 6; }
+
+  .fbox .grip {
+    position: absolute; right: -6px; bottom: -6px;
+    width: 13px; height: 13px;
+    background: var(--accent); border: 2px solid #fff; border-radius: 3px;
+    cursor: nwse-resize; display: none; z-index: 7;
+  }
+  .editor-stage .fbox.sel .grip { display: block; }
+
+  .fbox .tagname {
+    position: absolute; left: 0; top: -18px;
+    font: 700 10px/1.5 system-ui, sans-serif; letter-spacing: .04em;
+    background: var(--accent); color: #fff;
+    padding: 1px 7px; border-radius: 4px 4px 0 0;
+    white-space: nowrap; display: none; z-index: 7;
+  }
+  .fbox.img-field .tagname { background: #d658c4; }
+  .editor-stage .fbox.sel .tagname { display: block; }
+
+  .ghost {                 /* used for disable button. */
+    position: absolute;
+    border: 2px dashed var(--accent);
+    background: rgba(61,107,255,.12);
+    pointer-events: none; z-index: 9;
+  }
+
+  /* ---------- Forms ---------- */
+  label.lbl {
+    display: block; font-size: .7rem; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 5px;
+  }
+  input[type="text"], input[type="number"], input[type="url"], select, textarea {
+    width: 100%; max-width: 100%; min-width: 0;
+    font: inherit; padding: 8px 10px;
+    border: 1px solid #d2dae7; border-radius: 8px; background: #fff; color: var(--ink);
+  }
+  textarea { resize: vertical; min-height: 62px; font-size: .88rem; }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(61,107,255,.15);
+  }
+  input[type="color"] {
+    width: 100%; height: 34px; padding: 2px;
+    border: 1px solid #d2dae7; border-radius: 8px; background: #fff;
+  }
+  /* File inputs size themselves from the OS button label and are a common
+     source of overflow, so they are clamped explicitly. */
+  input[type="file"] { width: 100%; max-width: 100%; min-width: 0; font-size: .82rem; }
+
+  .field { margin-bottom: 12px; }
+  .field:last-child { margin-bottom: 0; }
+
+  /* auto-fit + minmax lets these grids drop a column instead of forcing their
+     tracks narrower than the inputs can render, which is what made the X/Y/W/H
+     boxes spill out of the card on a tight sidebar. */
+  .row   { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 9px; }
+  .row-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); gap: 7px; }
+  .row-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(65px, 1fr)); gap: 6px; }
+  .row > *, .row-3 > *, .row-4 > * { min-width: 0; }
+
+  .check { display: flex; align-items: center; gap: 8px; font-size: .84rem; }
+  .check input { width: auto; flex: 0 0 auto; }
+  .check label { min-width: 0; }
+
+  /* Field-type switch */
+  .seg { display: flex; background: #eef1f7; border-radius: 8px; padding: 3px; max-width: 100%; }
+  .seg button {
+    flex: 1 1 0; min-width: 0; border: 0; background: transparent; font: inherit; font-weight: 600;
+    font-size: .82rem; padding: 7px 6px; border-radius: 6px; cursor: pointer; color: var(--muted);
+  }
+  .seg button.on { background: #fff; color: var(--ink); box-shadow: 0 1px 3px rgba(26,35,51,.14); }
+
+  /* ---------- Buttons ---------- */
+  .btn {
+    font: inherit; font-weight: 600; padding: 9px 15px;
+    border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: #fff;
+    transition: background .15s ease, transform .1s ease;
+    /* Shrink-to-fit rather than forcing the row wider, but never below a
+       tappable size; the label wraps inside the button if it has to. */
+    max-width: 100%;
+    min-width: 0;
+    line-height: 1.25;
+    text-align: center;
+    overflow-wrap: break-word;
+  }
+  .btn:hover { background: var(--accent-dark); }
+  .btn:active { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.ghost { background: #fff; color: var(--ink); border-color: #d2dae7; }
+  .btn.ghost:hover { background: #f4f7fc; }
+  .btn.danger { background: #fff; color: var(--bad); border-color: #f0cdc8; }
+  .btn.danger:hover { background: #fdf1ef; }
+  .btn.sm { padding: 6px 10px; font-size: .81rem; }
+  .btn.full { width: 100%; }
+  .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  /* Action rows wrap onto new lines instead of letting buttons overlap or
+     clip out of the card. flex-wrap does the wrapping; the flex-basis on the
+     children is what decides when a row breaks rather than compressing. */
+  .btn-row {
+    display: block;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+  }
+  .btn-row > .btn { flex: 0 1 auto; }
+  /* Pairs like Duplicate / Delete field share a row until it is too tight,
+     then each takes a full line of its own. */
+  .btn-row > .btn.sm { flex: 1 1 auto; }
+  .btn-row > .btn.full { flex: 1 1 100%; }
+
+  /* ---------- Lists ---------- */
+  .list { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .list-item {
+    display: flex; align-items: center; gap: 9px;
+    padding: 8px 10px; border-bottom: 1px solid var(--line);
+    cursor: pointer; font-size: .87rem;
+  }
+  .list-item:last-child { border-bottom: 0; }
+  .list-item:hover { background: #f5f8fd; }
+  .list-item.sel { background: #eaf0ff; }
+  /* min-width:0 is required for the ellipsis: without it the flex child sizes
+     to its text and pushes the delete button out of the row. */
+  .list-item .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list-item .meta { color: var(--muted); font-size: .72rem; white-space: nowrap; flex: 0 0 auto; }
+  .list-item .btn { flex: 0 0 auto; }
+  .pill {
+    font-size: .62rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase;
+    padding: 2px 6px; border-radius: 4px; flex: 0 0 auto;
+  }
+  .pill.text { background: #e7edff; color: #2a51d8; }
+  .pill.image { background: #fbe6f8; color: #a3238e; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.15); flex: 0 0 auto; }
+
+  .none { padding: 16px 12px; text-align: center; color: var(--muted); font-size: .83rem; }
+  /* Notes can carry a pasted font URL — an unbroken string long enough to
+     widen the whole sidebar if it is not allowed to break mid-word. */
+  .note { font-size: .77rem; color: var(--muted); margin: 9px 0 0; line-height: 1.5; overflow-wrap: anywhere; }
+  .note.warn { color: #a35c00; }
+
+  /* ---------- Drop zone (filler image fields) ---------- */
+  .drop {
+    border: 2px dashed #cdd7e6; border-radius: 9px;
+    padding: 12px; text-align: center; cursor: pointer;
+    background: #fbfcfe; transition: border-color .15s ease, background .15s ease;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: #f2f6ff; }
+  .drop .dz-label { font-size: .8rem; color: var(--muted); }
+  .drop img.thumb {
+    max-width: 100%; max-height: 90px; display: block; margin: 0 auto 8px;
+    border-radius: 5px; border: 1px solid var(--line);
+  }
+
+  /* ---------- Modal (PDF page picker) ---------- */
+  .modal {
+    position: fixed; inset: 0; z-index: 90;
+    background: rgba(16,22,34,.62);
+    display: grid; place-items: center; padding: 20px;
+  }
+  .modal[hidden] { display: none; }
+  .modal-card {
+    background: var(--panel); border-radius: 12px;
+    width: 100%; max-width: 860px; max-height: 88vh; min-width: 0;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 24px 70px rgba(0,0,0,.35);
+  }
+  .modal-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+  }
+  .modal-head h3 { margin: 0; font-size: .98rem; }
+  .modal-head .count { color: var(--muted); font-size: .82rem; }
+  .modal-body { padding: 16px 18px; overflow: auto; }
+  .modal-foot {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 13px 18px; border-top: 1px solid var(--line);
+  }
+  .modal-foot .spacer { margin-left: auto; }
+  .modal-foot input[type="number"] { width: 90px; }
+
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 12px; }
+  .thumb-item {
+    border: 2px solid var(--line); border-radius: 8px; padding: 6px;
+    cursor: pointer; text-align: center; background: #fbfcfe;
+    transition: border-color .12s ease, box-shadow .12s ease;
+  }
+  .thumb-item:hover { border-color: #b9c8e6; }
+  .thumb-item.sel { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(61,107,255,.18); }
+  .thumb-item canvas { width: 100%; height: auto; display: block; border-radius: 4px; background: #fff; }
+  .thumb-item span { display: block; font-size: .74rem; color: var(--muted); margin-top: 6px; font-weight: 600; }
+
+  .spinner {
+    width: 26px; height: 26px; margin: 20px auto;
+    border: 3px solid var(--line); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---------- Toast ---------- */
+  .toast {
+    position: fixed; left: 50%; bottom: 24px;
+    transform: translateX(-50%) translateY(20px);
+    background: #1a2333; color: #fff;
+    padding: 11px 20px; border-radius: 9px; font-size: .86rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    opacity: 0; pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease;
+    z-index: 120; max-width: 92vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.bad { background: var(--bad); }
+  .toast.good { background: var(--good); }
+
+  /* =====================================================================
+     Responsive tiers
+       ≤1024px  small laptop  — narrower sidebar, tighter padding
+       ≤900px   tablet        — sidebar drops below the stage, single column
+       ≤640px   phone         — stacked header and full-width action buttons
+     Each tier also reduces horizontal padding, because padding on a fixed
+     ancestor is what pushes content past the viewport edge once the columns
+     have already collapsed.
+     ===================================================================== */
+
+  @media (max-width: 1024px) {
+    .layout {
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 14px;
+      padding: 14px 14px 40px;
+    }
+    .card .body { padding: 12px; }
+    .btn { padding: 9px 12px; }
+    .btn.sm { padding: 6px 8px; }
+  }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
+    .stage-wrap { padding: 10px; }
+    .placeholder { min-height: 300px; padding: 24px 16px; }
+    /* The sidebar is full width here, so paired controls get their row back. */
+    .row { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  }
+
+  @media (max-width: 640px) {
+    .topbar {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 10px;
+      padding: 10px 14px;
+    }
+    .modes { margin-left: 0; width: 100%; }
+    .modes button { flex: 1 1 0; min-width: 0; padding: 8px 6px; font-size: .85rem; }
+
+    .layout { padding: 12px 12px 36px; gap: 12px; }
+    .card .body { padding: 11px; }
+
+    /* Action buttons stack rather than wrapping into ragged part-rows. */
+    .btn-row { flex-direction: column; align-items: stretch; }
+    .btn-row > .btn,
+    .btn-row > .btn.sm,
+    .btn-row > .btn.full { width: 100%; flex: 0 0 auto; }
+
+    .row { grid-template-columns: minmax(0, 1fr); }
+    .row-3, .row-4 { grid-template-columns: repeat(auto-fit, minmax(70px, 1fr)); }
+
+    .seg button { font-size: .78rem; padding: 7px 4px; }
+
+    .modal { padding: 10px; }
+    .modal-card { max-height: 94vh; border-radius: 10px; }
+    .modal-head, .modal-body, .modal-foot { padding-left: 13px; padding-right: 13px; }
+    .modal-head { flex-wrap: wrap; gap: 6px; }
+    .modal-foot { gap: 8px; }
+    .modal-foot .spacer { display: none; }   /* nothing left to push apart once wrapped */
+    .modal-foot .btn { flex: 1 1 130px; }
+    .modal-foot input[type="number"] { width: 72px; flex: 0 0 auto; }
+
+    .thumbs { grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 9px; }
+
+    /* Full-bleed toast: a centring transform plus a fixed width fights the
+       narrow viewport, so it is pinned to both edges instead. */
+    .toast {
+      left: 12px; right: 12px; bottom: 14px;
+      max-width: none;
+      transform: translateY(20px);
+    }
+    .toast.show { transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<!-- ============================ TOP BAR ============================ -->
+<div class="topbar">
+  <div>
+    <h1>Visual Template Mapper</h1>
+    <div class="sub">Map fields onto an image or PDF page, then fill and export</div>
+  </div>
+  <div class="modes">
+    <button type="button" id="tabEditor" class="on">Template Editor</button>
+    <button type="button" id="tabFiller">Form Filler</button>
+  </div>
+</div>
+
+<!-- ============================ EDITOR ============================ -->
+<div class="layout" id="viewEditor">
+
+  <div>
+    <div class="stage-wrap">
+      <div id="editorHost"></div>
+    </div>
+    <p class="note" id="editorHint" hidden>
+      Drag on empty space to draw a field · drag a field to move it · drag its corner grip to resize ·
+      press <b>Delete</b> to remove the selected field.
+    </p>
+  </div>
+
+  <div>
+    <!-- Template setup -->
+    <div class="card">
+      <h2>Template</h2>
+      <div class="body">
+        <div class="field">
+          <label class="lbl" for="tplName">Template name</label>
+          <input type="text" id="tplName" placeholder="e.g. Aadhaar Form, Exam Slip, ID Card" maxlength="80">
+        </div>
+
+        <div class="field">
+          <label class="lbl" for="tplFile">Background — image or PDF</label>
+          <input type="file" id="tplFile" accept="image/png,image/jpeg,image/webp,image/*,application/pdf,.pdf">
+          <p class="note" id="bgNote">PNG, JPG and WEBP load directly. A PDF opens a page picker.</p>
+        </div>
+
+        <div class="btn-row">
+          <button type="button" class="btn" id="saveTplBtn">Save template</button>
+          <button type="button" class="btn" id="newTplBtn">Clear draft</button>
+        </div>
+        <p class="note" id="tplStatus">Not saved yet.</p>
+      </div>
+    </div>
+
+    <!-- Google font -->
+    <div class="card">
+      <h2>Google Font</h2>
+      <div class="body">
+        <div class="field">
+          <label class="lbl" for="fontInput">Font URL, &lt;link&gt; tag or @import</label>
+          <textarea id="fontInput" rows="2"
+            placeholder="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap"></textarea>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn sm" id="applyFontBtn">Load font</button>
+          <button type="button" class="btn sm" id="clearFontBtn">Use default</button>
+        </div>
+        <p class="note" id="fontNote">No custom font loaded — using the system UI font.</p>
+      </div>
+    </div>
+
+    <!-- Field properties -->
+    <div class="card">
+      <h2>Field properties</h2>
+      <div class="body">
+        <p class="none" id="propsEmpty">Select a field on the stage, or drag to draw a new one.</p>
+
+        <div id="propsForm" hidden>
+          <div class="field">
+            <label class="lbl">Field type</label>
+            <div class="seg" id="typeSeg">
+              <button type="button" data-type="text">Text</button>
+              <button type="button" data-type="image">Image mask</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="fLabel">Label name</label>
+            <input type="text" id="fLabel" placeholder="e.g. Full Name, Photo" maxlength="60">
+          </div>
+
+          <!-- Text-only properties -->
+          <div id="textProps">
+            <div class="row">
+              <div class="field">
+                <label class="lbl" for="fSize">Font size (px)</label>
+                <input type="number" id="fSize" min="6" max="300" step="1">
+              </div>
+              <div class="field">
+                <label class="lbl" for="fColor">Text colour</label>
+                <input type="color" id="fColor">
+              </div>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label class="lbl" for="fAlign">Alignment</label>
+                <select id="fAlign">
+                  <option value="left">Left</option>
+                  <option value="center">Center</option>
+                  <option value="right">Right</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="lbl" for="fWeight">Weight</label>
+                <select id="fWeight">
+                  <option value="400">400 — Normal</option>
+                  <option value="700">700 — Bold</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="lbl" for="fFont">Font family</label>
+              <select id="fFont"><option value="">Template default</option></select>
+            </div>
+
+            <div class="field check">
+              <input type="checkbox" id="fMulti">
+              <label for="fMulti">Multi-line (renders a text area when filling)</label>
+            </div>
+          </div>
+
+          <!-- Image-mask-only properties -->
+          <div id="imageProps" hidden>
+            <div class="row">
+              <div class="field">
+                <label class="lbl" for="fShape">Mask shape</label>
+                <select id="fShape">
+                  <option value="rect">Rectangle / Square</option>
+                  <option value="circle">Circle / Oval</option>
+                  <option value="rounded">Rounded rectangle</option>
+                </select>
+              </div>
+              <div class="field">
+                <label class="lbl" for="fRadius">Corner radius (px)</label>
+                <input type="number" id="fRadius" min="0" max="400" step="1">
+              </div>
+            </div>
+
+            <div class="field">
+              <label class="lbl" for="fFit">Image fit</label>
+              <select id="fFit">
+                <option value="cover">Cover — fill the frame, crop overflow</option>
+                <option value="contain">Contain — fit inside, letterbox</option>
+                <option value="stretch">Stretch — distort to fill</option>
+              </select>
+            </div>
+
+            <div class="row">
+              <div class="field">
+                <label class="lbl" for="fStroke">Border colour</label>
+                <input type="color" id="fStroke">
+              </div>
+              <div class="field">
+                <label class="lbl" for="fStrokeW">Border width (px)</label>
+                <input type="number" id="fStrokeW" min="0" max="60" step="1">
+              </div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="lbl">Position &amp; size — background image pixels</label>
+            <div class="row-4">
+              <input type="number" id="fX" title="X" step="1" placeholder="X">
+              <input type="number" id="fY" title="Y" step="1" placeholder="Y">
+              <input type="number" id="fW" title="Width" step="1" placeholder="W">
+              <input type="number" id="fH" title="Height" step="1" placeholder="H">
+            </div>
+          </div>
+
+          <div class="btn-row">
+            <button type="button" class="btn sm" id="dupFieldBtn">Duplicate</button>
+            <button type="button" class="btn danger sm" id="delFieldBtn">Delete field</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Field list -->
+    <div class="card">
+      <h2>Fields <span class="n" id="fieldCount"></span></h2>
+      <div class="body"><div class="list" id="fieldList"></div></div>
+    </div>
+
+    <!-- Saved templates -->
+    <div class="card">
+      <h2>Saved templates</h2>
+      <div class="body">
+        <div class="list" id="tplList"></div>
+        <div class="btn-row" style="margin-top:11px">
+          <button type="button" class="btn sm" id="exportTplBtn">Export .json</button>
+          <button type="button" class="btn sm" id="importTplBtn">Import .json</button>
+          <input type="file" id="importTplFile" accept="application/json,.json" hidden>
+        </div>
+        <p class="note" id="storageNote"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ FILLER ============================ -->
+<div class="layout" id="viewFiller" hidden>
+
+  <div>
+    <div class="stage-wrap"><div id="fillerHost"></div></div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Template</h2>
+      <div class="body">
+        <div class="field">
+          <label class="lbl" for="fillerSelect">Choose a saved template</label>
+          <select id="fillerSelect"><option value="">— select —</option></select>
+        </div>
+        <div class="field check">
+          <input type="checkbox" id="showGuides">
+          <label for="showGuides">Show dotted guides (always hidden in exports)</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Fields</h2>
+      <div class="body" id="fillerFields"><p class="none">Nothing to fill in yet.</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Export</h2>
+      <div class="body">
+        <div class="btn-row">
+          <button type="button" class="btn" id="expPng">PNG</button>
+          <button type="button" class="btn" id="expPdf">PDF</button>
+          <button type="button" class="btn" id="expJson">JSON</button>
+          <button type="button" class="btn" id="expTxt">TXT</button>
+        </div>
+        <div class="btn-row" style="margin-top:9px">
+          <button type="button" class="btn sm full" id="clearFill">Clear all values</button>
+        </div>
+        <p class="note" id="libNote"></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================ PDF PAGE PICKER ============================ -->
+<div class="modal" id="pageModal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>Choose a page</h3>
+      <span class="count" id="pageCount"></span>
+    </div>
+    <div class="modal-body" id="pageBody">
+      <div class="spinner"></div>
+    </div>
+    <div class="modal-foot">
+      <label class="lbl" for="pageNum" style="margin:0">Page</label>
+      <input type="number" id="pageNum" min="1" value="1">
+      <span class="count" id="pageOf"></span>
+      <span class="spacer"></span>
+      <button type="button" class="btn" id="pageCancel">Cancel</button>
+      <button type="button" class="btn" id="pageUse">Use this page</button>
+    </div>expJson
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ===========================================================================
+  // 1. CONSTANTS / STORAGE
+  // ===========================================================================
+
+  var KEY = 'templateMapper.templates.v2';
+
+  // Coordinates are stored in the background's own pixel space, so a template
+  // is pinned to the source resolution and never drifts when the window — and
+  // therefore the displayed width — changes.
+  var TARGET_W = 1800;           // minimum width a PDF page is rasterised at
+  var CAP_W = 2000;              // hard ceiling on a stored background width
+  var MAX_H = 4200;              // guard against absurdly tall pages
+  var UPLOAD_MAX = 1400;         // max dimension for pictures dropped into masks
+
+  function loadTemplates() {
+    try {
+      var raw = window.localStorage.getItem(KEY);
+      var arr = raw ? JSON.parse(raw) : [];
+      return Object.prototype.toString.call(arr) === '[object Array]' ? arr : [];
+    } catch (err) { return []; }
+  }
+
+  function saveTemplates(list) {
+    try {
+      window.localStorage.setItem(KEY, JSON.stringify(list));
+      updateStorageNote();
+      return true;
+    } catch (err) {
+      // Backgrounds are stored as data URLs; a handful of 1800px pages can
+      // exhaust the ~5MB localStorage budget, and the write throws outright.
+      toast('Storage full — export a template to .json and delete it to free space.', 'bad');
+      return false;
+    }
+  }
+
+  function updateStorageNote() {
+    var note = document.getElementById('storageNote');
+    var list = loadTemplates();
+    var bytes = 0;
+    try { bytes = (window.localStorage.getItem(KEY) || '').length; } catch (e) {}
+
+    note.className = 'note' + (bytes > 3500000 ? ' warn' : '');
+    note.textContent = list.length + ' template(s) · about ' +
+      (bytes / 1048576).toFixed(2) + ' MB of roughly 5 MB used. Export a copy before clearing site data.';
+  }
+
+  function uid() {
+    return 'f' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+  }
+
+  // ===========================================================================
+  // 2. SMALL HELPERS
+  // ===========================================================================
+
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+
+  function toast(msg, kind) {
+    toastEl.textContent = msg;
+    toastEl.className = 'toast show' + (kind ? ' ' + kind : '');
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () {
+      toastEl.className = 'toast' + (kind ? ' ' + kind : '');
+    }, 3600);
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function safeName(s) {
+    return String(s || 'document').replace(/[^a-z0-9\-_ ]/gi, '').trim().replace(/\s+/g, '-') || 'document';
+  }
+
+  function clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+  function download(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    window.setTimeout(function () { URL.revokeObjectURL(url); }, 1500);
+  }
+
+  /**
+   * Fit a source image or canvas under the storage ceiling and return a JPEG
+   * data URL. This never upscales: enlarging a small raster adds no detail
+   * while multiplying the stored data URL, and localStorage is the binding
+   * constraint here. PDF pages are already rasterised at TARGET_W or better
+   * before they reach this function.
+   */
+  function normaliseToDataUrl(source, srcW, srcH) {
+    var scale = Math.min(1, CAP_W / srcW);
+    var w = Math.round(srcW * scale);
+    var h = Math.round(srcH * scale);
+
+    if (h > MAX_H) {
+      var k = MAX_H / h;
+      w = Math.round(w * k);
+      h = MAX_H;
+    }
+
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+
+    var cx = c.getContext('2d');
+    cx.fillStyle = '#ffffff';
+    cx.fillRect(0, 0, w, h);
+    cx.drawImage(source, 0, 0, w, h);
+
+    return { data: c.toDataURL('image/jpeg', 0.92), w: w, h: h };
+  }
+
+  // ===========================================================================
+  // 3. GOOGLE FONTS
+  // Accepts a bare URL, a <link> tag or an @import snippet, pulls the family
+  // names out of the query string and injects a stylesheet link once.
+  // ===========================================================================
+
+  var fontRegistry = [];   // family names currently loaded
+
+  function parseFontInput(raw) {
+    var text = String(raw || '').replace(/&amp;/g, '&');
+    var m = text.match(/https?:\/\/fonts\.googleapis\.com\/[^\s"'()<>]+/);
+    if (!m) { return null; }
+
+    var url = m[0];
+    var families = [];
+    var re = /[?&]family=([^&:]+)/g;
+    var hit;
+
+    while ((hit = re.exec(url)) !== null) {
+      try {
+        families.push(decodeURIComponent(hit[1]).replace(/\+/g, ' ').trim());
+      } catch (err) {
+        families.push(hit[1].replace(/\+/g, ' ').trim());
+      }
+    }
+
+    if (!families.length) { return null; }
+    return { url: url, families: families };
+  }
+
+  function injectFont(url, families) {
+    var already = document.querySelector('link[data-gfont="' + CSS_escape(url) + '"]');
+    if (!already) {
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = url;
+      link.setAttribute('data-gfont', url);
+      document.head.appendChild(link);
+    }
+
+    families.forEach(function (fam) {
+      if (fontRegistry.indexOf(fam) === -1) { fontRegistry.push(fam); }
+    });
+
+    refreshFontSelect();
+  }
+
+  /** Minimal attribute-selector escaping — the URL goes inside a quoted match. */
+  function CSS_escape(s) { return String(s).replace(/"/g, '\\"'); }
+
+  function fontStack(family) {
+    return family
+      ? '"' + family + '", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif'
+      : 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+  }
+
+  function refreshFontSelect() {
+    var sel = document.getElementById('fFont');
+    var keep = sel.value;
+
+    var html = '<option value="">Template default</option>';
+    fontRegistry.forEach(function (fam) {
+      html += '<option value="' + esc(fam) + '">' + esc(fam) + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.value = keep;
+  }
+
+  document.getElementById('applyFontBtn').addEventListener('click', function () {
+    var raw = document.getElementById('fontInput').value;
+    var parsed = parseFontInput(raw);
+
+    if (!parsed) {
+      toast('Could not find a fonts.googleapis.com URL in that text.', 'bad');
+      return;
+    }
+
+    injectFont(parsed.url, parsed.families);
+
+    ed.fontLink = parsed.url;
+    ed.fontFamily = parsed.families[0];
+
+    document.getElementById('fontNote').textContent =
+      'Loaded: ' + parsed.families.join(', ') + '. Applied to text fields using the template default.';
+
+    paintBoxes();
+    toast('Font loaded: ' + parsed.families[0], 'good');
+  });
+
+  document.getElementById('clearFontBtn').addEventListener('click', function () {
+    ed.fontLink = '';
+    ed.fontFamily = '';
+    document.getElementById('fontInput').value = '';
+    document.getElementById('fontNote').textContent = 'No custom font loaded — using the system UI font.';
+    paintBoxes();
+  });
+
+  // ===========================================================================
+  // 4. FIELD GEOMETRY AND STYLING
+  // Positions are written as percentages of the background, so geometry is
+  // resolution-independent; only font size and border width need converting
+  // from source pixels into displayed pixels.
+  // ===========================================================================
+
+  function stageScale(stageEl, tpl) {
+    var w = stageEl.getBoundingClientRect().width;
+    return (w > 0 && tpl.imgW > 0) ? (w / tpl.imgW) : 1;
+  }
+
+  function maskRadius(f, scale) {
+    if (f.shape === 'circle') { return '50%'; }
+    if (f.shape === 'rounded') { return Math.max(0, (f.radius || 0) * scale) + 'px'; }
+    return '0';
+  }
+
+  function styleBox(el, f, tpl, scale) {
+    el.style.left   = (f.x / tpl.imgW * 100) + '%';
+    el.style.top    = (f.y / tpl.imgH * 100) + '%';
+    el.style.width  = (f.w / tpl.imgW * 100) + '%';
+    el.style.height = (f.h / tpl.imgH * 100) + '%';
+
+    if (f.type === 'image') {
+      var mask = el.querySelector('.mask');
+      if (mask) {
+        mask.style.borderRadius = maskRadius(f, scale);
+        mask.style.border = (f.strokeWidth > 0)
+          ? (Math.max(1, f.strokeWidth * scale) + 'px solid ' + f.strokeColor)
+          : '0';
+      }
+      el.style.borderRadius = maskRadius(f, scale);
+      return;
+    }
+
+    el.style.fontSize = (f.size * scale) + 'px';
+    el.style.color = f.color;
+    el.style.textAlign = f.align;
+    el.style.fontWeight = f.weight;
+    el.style.fontFamily = fontStack(f.font || tpl.fontFamily);
+  }
+
+  /** Build the inner layer for a field: a text span or a mask container. */
+  function buildInner(f, value) {
+    if (f.type === 'image') {
+      var mask = document.createElement('span');
+      mask.className = 'mask';
+
+      if (value) {
+        var img = document.createElement('img');
+        img.src = value;
+        img.alt = f.label || 'Image';
+        img.style.objectFit = (f.fit === 'stretch') ? 'fill' : f.fit;
+        mask.appendChild(img);
+      }
+      return mask;
+    }
+
+    var txt = document.createElement('span');
+    txt.className = 'txt';
+    txt.textContent = value || '';
+    return txt;
+  }
+
+  // ===========================================================================
+  // 5. EDITOR STATE
+  // ===========================================================================
+
+  var ed = {
+    id: null, name: '', image: null, imgW: 0, imgH: 0,
+    fontLink: '', fontFamily: '',
+    fields: [], selected: null,
+    stage: null, img: null
+  };
+
+  var editorHost = document.getElementById('editorHost');
+  var editorHint = document.getElementById('editorHint');
+  var tplNameInput = document.getElementById('tplName');
+  var tplStatus = document.getElementById('tplStatus');
+
+  var P = {
+    empty: document.getElementById('propsEmpty'),
+    form:  document.getElementById('propsForm'),
+    textProps:  document.getElementById('textProps'),
+    imageProps: document.getElementById('imageProps'),
+    label: document.getElementById('fLabel'),
+    size: document.getElementById('fSize'),
+    color: document.getElementById('fColor'),
+    align: document.getElementById('fAlign'),
+    weight: document.getElementById('fWeight'),
+    font: document.getElementById('fFont'),
+    multi: document.getElementById('fMulti'),
+    shape: document.getElementById('fShape'),
+    radius: document.getElementById('fRadius'),
+    fit: document.getElementById('fFit'),
+    stroke: document.getElementById('fStroke'),
+    strokeW: document.getElementById('fStrokeW'),
+    x: document.getElementById('fX'),
+    y: document.getElementById('fY'),
+    w: document.getElementById('fW'),
+    h: document.getElementById('fH')
+  };
+
+  function currentTpl() {
+    return {
+      id: ed.id || uid(),
+      name: ed.name || 'Untitled template',
+      image: ed.image, imgW: ed.imgW, imgH: ed.imgH,
+      fontLink: ed.fontLink, fontFamily: ed.fontFamily,
+      fields: ed.fields, updatedAt: Date.now()
+    };
+  }
+
+  function placeholderHtml(title, body) {
+    return '<div class="placeholder"><div><strong>' + title + '</strong>' + body + '</div></div>';
+  }
+
+  function renderEditorStage() {
+    editorHost.innerHTML = '';
+
+    if (!ed.image) {
+      editorHost.innerHTML = placeholderHtml('No background loaded',
+        'Upload a PNG, JPG or WEBP — or a PDF and pick a page — then drag on it to map your fields.');
+      editorHint.hidden = true;
+      return;
+    }
+
+    var stage = document.createElement('div');
+    stage.className = 'stage editor-stage drawing guides';
+    stage.style.maxWidth = ed.imgW + 'px';
+
+    var img = document.createElement('img');
+    img.className = 'bg';
+    img.alt = ed.name || 'Template background';
+    img.src = ed.image;
+    stage.appendChild(img);
+
+    ed.stage = stage;
+    ed.img = img;
+    editorHost.appendChild(stage);
+    editorHint.hidden = false;
+
+    // Boxes can only be positioned once the image has laid out and given the
+    // stage a real width.
+    if (img.complete) { paintBoxes(); } else { img.onload = paintBoxes; }
+
+    attachStageHandlers();
+  }
+
+  function paintBoxes() {
+    if (!ed.stage) { return; }
+
+    var old = ed.stage.querySelectorAll('.fbox');
+    for (var i = 0; i < old.length; i++) { old[i].parentNode.removeChild(old[i]); }
+
+    var tpl = currentTpl();
+    var scale = stageScale(ed.stage, tpl);
+
+    ed.fields.forEach(function (f) {
+      var box = document.createElement('div');
+      box.className = 'fbox' + (f.type === 'image' ? ' img-field' : '') + (f.id === ed.selected ? ' sel' : '');
+      box.setAttribute('data-id', f.id);
+
+      if (f.type === 'image') {
+        var mask = document.createElement('span');
+        mask.className = 'mask';
+        var hint = document.createElement('span');
+        hint.className = 'maskhint';
+        hint.textContent = f.label || 'Image';
+        mask.appendChild(hint);
+        box.appendChild(mask);
+      } else {
+        var txt = document.createElement('span');
+        txt.className = 'txt';
+        txt.textContent = f.label || 'Field';
+        box.appendChild(txt);
+      }
+
+      var tag = document.createElement('span');
+      tag.className = 'tagname';
+      tag.textContent = f.label || 'Field';
+      box.appendChild(tag);
+
+      var grip = document.createElement('span');
+      grip.className = 'grip';
+      box.appendChild(grip);
+
+      styleBox(box, f, tpl, scale);
+      ed.stage.appendChild(box);
+    });
+  }
+
+  /** Pointer position converted into background-image pixel coordinates. */
+  function toImagePoint(ev) {
+    var r = ed.stage.getBoundingClientRect();
+    return {
+      x: clamp((ev.clientX - r.left) / r.width, 0, 1) * ed.imgW,
+      y: clamp((ev.clientY - r.top) / r.height, 0, 1) * ed.imgH
+    };
+  }
+
+  function attachStageHandlers() {
+    var drawing = false, moving = false, resizing = false;
+    var start = null, ghost = null, target = null, origin = null;
+
+    ed.stage.addEventListener('pointerdown', function (ev) {
+      var onGrip = ev.target.classList && ev.target.classList.contains('grip');
+      var box = ev.target.closest ? ev.target.closest('.fbox') : null;
+
+      if (box) {
+        var id = box.getAttribute('data-id');
+        selectField(id);
+
+        var f = fieldById(id);
+        if (!f) { return; }
+
+        origin = { f: f, start: toImagePoint(ev), x: f.x, y: f.y, w: f.w, h: f.h };
+        target = box;
+        if (onGrip) { resizing = true; } else { moving = true; }
+
+        ed.stage.setPointerCapture(ev.pointerId);
+        ev.preventDefault();
+        return;
+      }
+
+      drawing = true;
+      start = toImagePoint(ev);
+
+      ghost = document.createElement('div');
+      ghost.className = 'ghost';
+      ed.stage.appendChild(ghost);
+
+      ed.stage.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    });
+
+    ed.stage.addEventListener('pointermove', function (ev) {
+      if (!drawing && !moving && !resizing) { return; }
+
+      var p = toImagePoint(ev);
+
+      if (drawing) {
+        var x = Math.min(start.x, p.x), y = Math.min(start.y, p.y);
+        var w = Math.abs(p.x - start.x), h = Math.abs(p.y - start.y);
+        ghost.style.left = (x / ed.imgW * 100) + '%';
+        ghost.style.top = (y / ed.imgH * 100) + '%';
+        ghost.style.width = (w / ed.imgW * 100) + '%';
+        ghost.style.height = (h / ed.imgH * 100) + '%';
+        return;
+      }
+
+      var dx = p.x - origin.start.x, dy = p.y - origin.start.y;
+
+      if (moving) {
+        origin.f.x = clamp(origin.x + dx, 0, ed.imgW - origin.f.w);
+        origin.f.y = clamp(origin.y + dy, 0, ed.imgH - origin.f.h);
+      } else {
+        origin.f.w = clamp(origin.w + dx, 12, ed.imgW - origin.f.x);
+        origin.f.h = clamp(origin.h + dy, 10, ed.imgH - origin.f.y);
+      }
+
+      styleBox(target, origin.f, currentTpl(), stageScale(ed.stage, currentTpl()));
+      syncGeometryInputs();
+    });
+
+    function finish(ev) {
+      if (drawing) {
+        drawing = false;
+
+        var p = toImagePoint(ev);
+        var x = Math.min(start.x, p.x), y = Math.min(start.y, p.y);
+        var w = Math.abs(p.x - start.x), h = Math.abs(p.y - start.y);
+
+        if (ghost && ghost.parentNode) { ghost.parentNode.removeChild(ghost); }
+        ghost = null;
+
+        // Ignore stray clicks that were never really a drag.
+        if (w > 10 && h > 8) {
+          var f = {
+            id: uid(),
+            type: 'text',
+            label: 'Field ' + (ed.fields.length + 1),
+            x: Math.round(x), y: Math.round(y), w: Math.round(w), h: Math.round(h),
+            size: Math.max(10, Math.round(h * 0.6)),
+            color: '#111111', align: 'left', weight: '400', font: '',
+            multi: h > 90,
+            shape: 'rect', radius: Math.round(Math.min(w, h) * 0.12),
+            fit: 'cover', strokeColor: '#333333', strokeWidth: 0
+          };
+
+          ed.fields.push(f);
+          selectField(f.id);
+          paintBoxes();
+          renderFieldList();
+          P.label.focus();
+          P.label.select();
+        }
+      }
+
+      if (moving || resizing) {
+        moving = resizing = false;
+        origin.f.x = Math.round(origin.f.x);
+        origin.f.y = Math.round(origin.f.y);
+        origin.f.w = Math.round(origin.f.w);
+        origin.f.h = Math.round(origin.f.h);
+        syncGeometryInputs();
+        renderFieldList();
+      }
+
+      try { ed.stage.releasePointerCapture(ev.pointerId); } catch (e) {}
+    }
+
+    ed.stage.addEventListener('pointerup', finish);
+    ed.stage.addEventListener('pointercancel', finish);
+  }
+
+  function fieldById(id) {
+    for (var i = 0; i < ed.fields.length; i++) {
+      if (ed.fields[i].id === id) { return ed.fields[i]; }
+    }
+    return null;
+  }
+
+  function selectField(id) {
+    ed.selected = id;
+
+    // Only class names are touched here — rebuilding the stage mid-drag would
+    // destroy the element the pointer is captured on.
+    var boxes = ed.stage ? ed.stage.querySelectorAll('.fbox') : [];
+    for (var i = 0; i < boxes.length; i++) {
+      var bid = boxes[i].getAttribute('data-id');
+      var bf = fieldById(bid);
+      boxes[i].className = 'fbox' +
+        (bf && bf.type === 'image' ? ' img-field' : '') +
+        (bid === id ? ' sel' : '');
+    }
+
+    renderProps();
+    renderFieldList();
+  }
+
+  // ---- properties panel ------------------------------------------------------
+
+  function renderProps() {
+    var f = fieldById(ed.selected);
+
+    P.empty.hidden = !!f;
+    P.form.hidden = !f;
+    if (!f) { return; }
+
+    var seg = document.getElementById('typeSeg').children;
+    seg[0].className = f.type === 'text' ? 'on' : '';
+    seg[1].className = f.type === 'image' ? 'on' : '';
+
+    P.textProps.hidden = (f.type !== 'text');
+    P.imageProps.hidden = (f.type !== 'image');
+
+    P.label.value = f.label;
+    P.size.value = f.size;
+    P.color.value = f.color;
+    P.align.value = f.align;
+    P.weight.value = f.weight;
+    P.font.value = f.font || '';
+    P.multi.checked = !!f.multi;
+
+    P.shape.value = f.shape;
+    P.radius.value = f.radius;
+    P.fit.value = f.fit;
+    P.stroke.value = f.strokeColor;
+    P.strokeW.value = f.strokeWidth;
+
+    syncGeometryInputs();
+  }
+
+  function syncGeometryInputs() {
+    var f = fieldById(ed.selected);
+    if (!f) { return; }
+    P.x.value = Math.round(f.x);
+    P.y.value = Math.round(f.y);
+    P.w.value = Math.round(f.w);
+    P.h.value = Math.round(f.h);
+  }
+
+  /** Write one property onto the selected field and refresh just that box. */
+  function applyProp(key, value, heavy) {
+    var f = fieldById(ed.selected);
+    if (!f) { return; }
+
+    f[key] = value;
+
+    // Switching field type swaps the inner element, so the box is rebuilt.
+    if (heavy) { paintBoxes(); renderFieldList(); return; }
+
+    var box = ed.stage ? ed.stage.querySelector('.fbox[data-id="' + f.id + '"]') : null;
+    if (box) {
+      styleBox(box, f, currentTpl(), stageScale(ed.stage, currentTpl()));
+
+      var txt = box.querySelector('.txt');
+      if (txt) { txt.textContent = f.label || 'Field'; }
+
+      var hint = box.querySelector('.maskhint');
+      if (hint) { hint.textContent = f.label || 'Image'; }
+
+      var tag = box.querySelector('.tagname');
+      if (tag) { tag.textContent = f.label || 'Field'; }
+    }
+
+    renderFieldList();
+  }
+
+  document.getElementById('typeSeg').addEventListener('click', function (ev) {
+    var t = ev.target.getAttribute && ev.target.getAttribute('data-type');
+    if (!t) { return; }
+    applyProp('type', t, true);
+    renderProps();
+  });
+
+  P.label.addEventListener('input',  function () { applyProp('label', P.label.value); });
+  P.size.addEventListener('input',   function () { applyProp('size', clamp(parseInt(P.size.value, 10) || 12, 6, 300)); });
+  P.color.addEventListener('input',  function () { applyProp('color', P.color.value); });
+  P.align.addEventListener('change', function () { applyProp('align', P.align.value); });
+  P.weight.addEventListener('change',function () { applyProp('weight', P.weight.value); });
+  P.font.addEventListener('change',  function () { applyProp('font', P.font.value); });
+  P.multi.addEventListener('change', function () { applyProp('multi', P.multi.checked); });
+
+  P.shape.addEventListener('change',  function () { applyProp('shape', P.shape.value); });
+  P.radius.addEventListener('input',  function () { applyProp('radius', clamp(parseInt(P.radius.value, 10) || 0, 0, 400)); });
+  P.fit.addEventListener('change',    function () { applyProp('fit', P.fit.value); });
+  P.stroke.addEventListener('input',  function () { applyProp('strokeColor', P.stroke.value); });
+  P.strokeW.addEventListener('input', function () { applyProp('strokeWidth', clamp(parseInt(P.strokeW.value, 10) || 0, 0, 60)); });
+
+  ['x', 'y', 'w', 'h'].forEach(function (k) {
+    P[k].addEventListener('input', function () {
+      var n = parseInt(P[k].value, 10);
+      if (isNaN(n)) { return; }
+      var floor = (k === 'w') ? 12 : (k === 'h' ? 10 : 0);
+      applyProp(k, Math.max(floor, n));
+    });
+  });
+
+  document.getElementById('delFieldBtn').addEventListener('click', function () {
+    if (!ed.selected) { return; }
+    ed.fields = ed.fields.filter(function (f) { return f.id !== ed.selected; });
+    ed.selected = null;
+    paintBoxes();
+    renderProps();
+    renderFieldList();
+  });
+
+  document.getElementById('dupFieldBtn').addEventListener('click', function () {
+    var f = fieldById(ed.selected);
+    if (!f) { return; }
+
+    var copy = JSON.parse(JSON.stringify(f));
+    copy.id = uid();
+    copy.label = f.label + ' copy';
+    copy.y = clamp(f.y + f.h + 8, 0, Math.max(0, ed.imgH - f.h));
+
+    ed.fields.push(copy);
+    selectField(copy.id);
+    paintBoxes();
+  });
+
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key !== 'Delete' && ev.key !== 'Backspace') { return; }
+    if (document.getElementById('viewEditor').hidden || !ed.selected) { return; }
+
+    var tag = (document.activeElement && document.activeElement.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') { return; }
+
+    ev.preventDefault();
+    document.getElementById('delFieldBtn').click();
+  });
+
+  function renderFieldList() {
+    var host = document.getElementById('fieldList');
+    document.getElementById('fieldCount').textContent = ed.fields.length ? ed.fields.length + ' mapped' : '';
+
+    if (!ed.fields.length) {
+      host.innerHTML = '<p class="none">No fields mapped yet.</p>';
+      return;
+    }
+
+    var html = '';
+    ed.fields.forEach(function (f) {
+      html += '<div class="list-item' + (f.id === ed.selected ? ' sel' : '') + '" data-id="' + f.id + '">' +
+                '<span class="pill ' + f.type + '">' + (f.type === 'image' ? 'IMG' : 'TXT') + '</span>' +
+                (f.type === 'text' ? '<span class="swatch" style="background:' + esc(f.color) + '"></span>' : '') +
+                '<span class="nm">' + esc(f.label || 'Field') + '</span>' +
+                '<span class="meta">' + Math.round(f.w) + '×' + Math.round(f.h) + '</span>' +
+              '</div>';
+    });
+    host.innerHTML = html;
+  }
+
+  document.getElementById('fieldList').addEventListener('click', function (ev) {
+    var row = ev.target.closest ? ev.target.closest('.list-item') : null;
+    if (row) { selectField(row.getAttribute('data-id')); }
+  });
+
+  // ===========================================================================
+  // 6. BACKGROUND LOADING — IMAGE OR PDF
+  // ===========================================================================
+
+  var pdfState = { doc: null, pages: 0, chosen: 1 };
+
+  document.getElementById('tplFile').addEventListener('change', function (ev) {
+    var file = ev.target.files && ev.target.files[0];
+    if (!file) { return; }
+
+    var isPdf = (file.type === 'application/pdf') || /\.pdf$/i.test(file.name);
+    if (isPdf) { openPdf(file); } else { loadImageFile(file); }
+
+    ev.target.value = '';    // allow re-picking the same file
+  });
+
+  function adoptBackground(result) {
+    // Existing fields keep their relative placement when the background is
+    // swapped for one of a different size.
+    if (ed.fields.length && ed.imgW && ed.imgH) {
+      var fx = result.w / ed.imgW, fy = result.h / ed.imgH;
+      ed.fields.forEach(function (f) {
+        f.x *= fx; f.y *= fy; f.w *= fx; f.h *= fy;
+        f.size = Math.max(6, Math.round(f.size * fy));
+        f.radius = Math.round((f.radius || 0) * fx);
+      });
+    }
+
+    ed.image = result.data;
+    ed.imgW = result.w;
+    ed.imgH = result.h;
+
+    renderEditorStage();
+    renderFieldList();
+  }
+
+  function loadImageFile(file) {
+    var reader = new FileReader();
+
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var out = normaliseToDataUrl(img, img.naturalWidth, img.naturalHeight);
+        adoptBackground(out);
+        toast('Background loaded at ' + out.w + '×' + out.h + 'px.', 'good');
+      };
+      img.onerror = function () { toast('That file could not be read as an image.', 'bad'); };
+      img.src = reader.result;
+    };
+
+    reader.onerror = function () { toast('The file could not be read.', 'bad'); };
+    reader.readAsDataURL(file);
+  }
+
+  // ---- PDF page picker -------------------------------------------------------
+
+  var pageModal = document.getElementById('pageModal');
+  var pageBody = document.getElementById('pageBody');
+
+  function openPdf(file) {
+    if (!window.pdfjsLib) {
+      toast('PDF support needs pdf.js, which did not load. Upload an image instead.', 'bad');
+      return;
+    }
+
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+    pageBody.innerHTML = '<div class="spinner"></div>';
+    pageModal.hidden = false;
+
+    var reader = new FileReader();
+
+    reader.onload = function () {
+      var task = window.pdfjsLib.getDocument({ data: new Uint8Array(reader.result) });
+
+      task.promise.then(function (doc) {
+        pdfState.doc = doc;
+        pdfState.pages = doc.numPages;
+        pdfState.chosen = 1;
+
+        document.getElementById('pageCount').textContent = doc.numPages + ' page(s)';
+        document.getElementById('pageOf').textContent = 'of ' + doc.numPages;
+
+        var num = document.getElementById('pageNum');
+        num.max = doc.numPages;
+        num.value = 1;
+
+        renderThumbs();
+      }).catch(function (err) {
+        pageBody.innerHTML = '<p class="none">That PDF could not be opened. It may be encrypted or damaged.</p>';
+      });
+    };
+
+    reader.onerror = function () { toast('The PDF could not be read.', 'bad'); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function renderThumbs() {
+    var MAXTHUMBS = 40;
+    var doc = pdfState.doc;
+    var n = Math.min(doc.numPages, MAXTHUMBS);
+
+    pageBody.innerHTML = '';
+
+    if (doc.numPages > MAXTHUMBS) {
+      var note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = 'Showing the first ' + MAXTHUMBS + ' pages as thumbnails. ' +
+        'For anything later, type the page number below.';
+      pageBody.appendChild(note);
+    }
+
+    var grid = document.createElement('div');
+    grid.className = 'thumbs';
+    pageBody.appendChild(grid);
+
+    for (var i = 1; i <= n; i++) { addThumb(grid, i); }
+  }
+
+  function addThumb(grid, pageNo) {
+    var item = document.createElement('div');
+    item.className = 'thumb-item' + (pageNo === pdfState.chosen ? ' sel' : '');
+    item.setAttribute('data-page', pageNo);
+
+    var canvas = document.createElement('canvas');
+    var cap = document.createElement('span');
+    cap.textContent = 'Page ' + pageNo;
+
+    item.appendChild(canvas);
+    item.appendChild(cap);
+    grid.appendChild(item);
+
+    item.addEventListener('click', function () {
+      pdfState.chosen = pageNo;
+      document.getElementById('pageNum').value = pageNo;
+      markChosenThumb();
+    });
+
+    pdfState.doc.getPage(pageNo).then(function (page) {
+      var base = page.getViewport({ scale: 1 });
+      var scale = 150 / base.width;
+      var vp = page.getViewport({ scale: scale });
+
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+
+      return page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    }).catch(function () { /* a single failed thumbnail is not worth an alert */ });
+  }
+
+  function markChosenThumb() {
+    var items = pageBody.querySelectorAll('.thumb-item');
+    for (var i = 0; i < items.length; i++) {
+      var on = parseInt(items[i].getAttribute('data-page'), 10) === pdfState.chosen;
+      items[i].className = 'thumb-item' + (on ? ' sel' : '');
+    }
+  }
+
+  document.getElementById('pageNum').addEventListener('input', function () {
+    var n = clamp(parseInt(this.value, 10) || 1, 1, pdfState.pages || 1);
+    pdfState.chosen = n;
+    markChosenThumb();
+  });
+
+  document.getElementById('pageCancel').addEventListener('click', closePageModal);
+
+  pageModal.addEventListener('click', function (ev) {
+    if (ev.target === pageModal) { closePageModal(); }
+  });
+
+  function closePageModal() {
+    pageModal.hidden = true;
+    pageBody.innerHTML = '';
+    if (pdfState.doc && pdfState.doc.destroy) { try { pdfState.doc.destroy(); } catch (e) {} }
+    pdfState.doc = null;
+  }
+
+  document.getElementById('pageUse').addEventListener('click', function () {
+    if (!pdfState.doc) { return; }
+
+    var pageNo = clamp(pdfState.chosen, 1, pdfState.pages);
+    pageBody.innerHTML = '<div class="spinner"></div>';
+
+    pdfState.doc.getPage(pageNo).then(function (page) {
+      var base = page.getViewport({ scale: 1 });
+
+      // Render at whatever scale reaches the target width — never below 1:1,
+      // so a page is upsampled rather than exported soft.
+      var scale = Math.max(1, TARGET_W / base.width);
+      var vp = page.getViewport({ scale: scale });
+
+      var canvas = document.createElement('canvas');
+      canvas.width = Math.round(vp.width);
+      canvas.height = Math.round(vp.height);
+
+      var cx = canvas.getContext('2d');
+      cx.fillStyle = '#ffffff';
+      cx.fillRect(0, 0, canvas.width, canvas.height);
+
+      return page.render({ canvasContext: cx, viewport: vp }).promise.then(function () {
+        return canvas;
+      });
+    }).then(function (canvas) {
+      var out = normaliseToDataUrl(canvas, canvas.width, canvas.height);
+      adoptBackground(out);
+      closePageModal();
+      toast('Page ' + pageNo + ' rendered at ' + out.w + '×' + out.h + 'px.', 'good');
+    }).catch(function () {
+      toast('That page could not be rendered.', 'bad');
+      closePageModal();
+    });
+  });
+
+  // ===========================================================================
+  // 7. TEMPLATE CRUD
+  // ===========================================================================
+
+  tplNameInput.addEventListener('input', function () { ed.name = tplNameInput.value; });
+
+  document.getElementById('saveTplBtn').addEventListener('click', function () {
+    if (!ed.image) { toast('Load a background first.', 'bad'); return; }
+    if (!ed.name.trim()) { toast('Give the template a name first.', 'bad'); tplNameInput.focus(); return; }
+    if (!ed.fields.length) { toast('Map at least one field before saving.', 'bad'); return; }
+
+    var list = loadTemplates();
+    var tpl = currentTpl();
+    tpl.name = ed.name.trim();
+
+    var at = -1;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === tpl.id) { at = i; } }
+    if (at === -1) { list.push(tpl); } else { list[at] = tpl; }
+
+    if (saveTemplates(list)) {
+      ed.id = tpl.id;
+      tplStatus.textContent = 'Saved · ' + tpl.fields.length + ' field(s) · ' + new Date().toLocaleTimeString();
+      renderTemplateList();
+      refreshFillerSelect();
+      toast('Template saved.', 'good');
+    }
+  });
+
+  document.getElementById('newTplBtn').addEventListener('click', function () {
+    ed.id = null; ed.name = ''; ed.image = null; ed.imgW = ed.imgH = 0;
+    ed.fields = []; ed.selected = null; ed.fontLink = ''; ed.fontFamily = '';
+
+    tplNameInput.value = '';
+    document.getElementById('fontInput').value = '';
+    document.getElementById('fontNote').textContent = 'No custom font loaded — using the system UI font.';
+    tplStatus.textContent = 'Not saved yet.';
+
+    renderEditorStage();
+    renderProps();
+    renderFieldList();
+    renderTemplateList();
+    toast('Draft cleared.');
+  });
+
+  function loadIntoEditor(id) {
+    var list = loadTemplates();
+    var tpl = null;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === id) { tpl = list[i]; } }
+    if (!tpl) { return; }
+
+    ed.id = tpl.id;
+    ed.name = tpl.name;
+    ed.image = tpl.image;
+    ed.imgW = tpl.imgW;
+    ed.imgH = tpl.imgH;
+    ed.fontLink = tpl.fontLink || '';
+    ed.fontFamily = tpl.fontFamily || '';
+    ed.fields = JSON.parse(JSON.stringify(tpl.fields)).map(normaliseField);
+    ed.selected = null;
+
+    tplNameInput.value = tpl.name;
+    document.getElementById('fontInput').value = ed.fontLink;
+
+    if (ed.fontLink) {
+      var parsed = parseFontInput(ed.fontLink);
+      if (parsed) { injectFont(parsed.url, parsed.families); }
+      document.getElementById('fontNote').textContent = 'Loaded: ' + (ed.fontFamily || '—');
+    }
+
+    tplStatus.textContent = 'Editing saved template · ' + tpl.fields.length + ' field(s)';
+
+    renderEditorStage();
+    renderProps();
+    renderFieldList();
+    renderTemplateList();
+  }
+
+  /** Fill in any property a template saved by an older build is missing. */
+  function normaliseField(f) {
+    f.type = f.type || 'text';
+    f.font = f.font || '';
+    f.shape = f.shape || 'rect';
+    f.radius = (f.radius === undefined) ? 12 : f.radius;
+    f.fit = f.fit || 'cover';
+    f.strokeColor = f.strokeColor || '#333333';
+    f.strokeWidth = (f.strokeWidth === undefined) ? 0 : f.strokeWidth;
+    f.weight = f.weight || '400';
+    f.align = f.align || 'left';
+    f.color = f.color || '#111111';
+    f.size = f.size || 16;
+    return f;
+  }
+
+  function renderTemplateList() {
+    var host = document.getElementById('tplList');
+    var list = loadTemplates();
+
+    if (!list.length) {
+      host.innerHTML = '<p class="none">No templates saved yet.</p>';
+      updateStorageNote();
+      return;
+    }
+
+    var html = '';
+    list.forEach(function (t) {
+      var imgs = 0;
+      t.fields.forEach(function (f) { if (f.type === 'image') { imgs++; } });
+
+      html += '<div class="list-item' + (t.id === ed.id ? ' sel' : '') + '" data-id="' + esc(t.id) + '">' +
+                '<span class="nm">' + esc(t.name) + '</span>' +
+                '<span class="meta">' + t.fields.length + ' fields' + (imgs ? ' · ' + imgs + ' img' : '') + '</span>' +
+                '<button type="button" class="btn danger sm" data-del="' + esc(t.id) + '">&times;</button>' +
+              '</div>';
+    });
+
+    host.innerHTML = html;
+    updateStorageNote();
+  }
+
+  document.getElementById('tplList').addEventListener('click', function (ev) {
+    var del = ev.target.getAttribute && ev.target.getAttribute('data-del');
+
+    if (del) {
+      ev.stopPropagation();
+      var list = loadTemplates().filter(function (t) { return t.id !== del; });
+      saveTemplates(list);
+      if (ed.id === del) { ed.id = null; tplStatus.textContent = 'Not saved yet.'; }
+      renderTemplateList();
+      refreshFillerSelect();
+      toast('Template deleted.');
+      return;
+    }
+
+    var row = ev.target.closest ? ev.target.closest('.list-item') : null;
+    if (row) { loadIntoEditor(row.getAttribute('data-id')); }
+  });
+
+  document.getElementById('exportTplBtn').addEventListener('click', function () {
+    var list = loadTemplates();
+    if (!list.length) { toast('There is nothing to export yet.', 'bad'); return; }
+
+    download(new Blob([JSON.stringify(list, null, 2)], { type: 'application/json' }),
+             'templates-' + new Date().toISOString().slice(0, 10) + '.json');
+    toast('Templates exported.', 'good');
+  });
+
+  document.getElementById('importTplBtn').addEventListener('click', function () {
+    document.getElementById('importTplFile').click();
+  });
+
+  document.getElementById('importTplFile').addEventListener('change', function (ev) {
+    var file = ev.target.files && ev.target.files[0];
+    if (!file) { return; }
+
+    var reader = new FileReader();
+    reader.onload = function () {
+      var incoming;
+      try { incoming = JSON.parse(reader.result); }
+      catch (err) { toast('That file is not valid JSON.', 'bad'); return; }
+
+      if (Object.prototype.toString.call(incoming) !== '[object Array]') { incoming = [incoming]; }
+
+      var list = loadTemplates();
+      var added = 0;
+
+      incoming.forEach(function (t) {
+        if (!t || !t.image || !t.fields) { return; }
+        t.id = uid();                       // fresh id so an import never overwrites
+        t.fields = t.fields.map(normaliseField);
+        list.push(t);
+        added++;
+      });
+
+      if (added && saveTemplates(list)) {
+        renderTemplateList();
+        refreshFillerSelect();
+        toast('Imported ' + added + ' template(s).', 'good');
+      } else if (!added) {
+        toast('No usable templates found in that file.', 'bad');
+      }
+
+      ev.target.value = '';
+    };
+    reader.readAsText(file);
+  });
+
+  // ===========================================================================
+  // 8. FORM FILLER
+  // ===========================================================================
+
+  var fill = {
+    tpl: null,
+    values: {},     // field id -> text
+    images: {},     // field id -> data URL
+    cache: {},      // template id -> { values, images }
+    stage: null
+  };
+
+  var fillerSelect = document.getElementById('fillerSelect');
+  var fillerHost = document.getElementById('fillerHost');
+  var showGuides = document.getElementById('showGuides');
+
+  function refreshFillerSelect() {
+    var list = loadTemplates();
+    var keep = fillerSelect.value;
+
+    var html = '<option value="">— select —</option>';
+    list.forEach(function (t) {
+      html += '<option value="' + esc(t.id) + '">' + esc(t.name) + '</option>';
+    });
+    fillerSelect.innerHTML = html;
+
+    fillerSelect.value = keep;
+    if (fillerSelect.value !== keep) { fillerSelect.value = ''; }
+  }
+
+  fillerSelect.addEventListener('change', function () {
+    var id = fillerSelect.value;
+
+    if (!id) {
+      fill.tpl = null;
+      renderFillerStage();
+      renderFillerInputs();
+      return;
+    }
+
+    var list = loadTemplates();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) {
+        fill.tpl = list[i];
+        fill.tpl.fields = fill.tpl.fields.map(normaliseField);
+      }
+    }
+
+    // Entries are remembered per template, so switching templates or hopping
+    // into the editor does not discard typed input or uploaded pictures.
+    if (!fill.cache[id]) { fill.cache[id] = { values: {}, images: {} }; }
+    fill.values = fill.cache[id].values;
+    fill.images = fill.cache[id].images;
+
+    if (fill.tpl.fontLink) {
+      var parsed = parseFontInput(fill.tpl.fontLink);
+      if (parsed) { injectFont(parsed.url, parsed.families); }
+    }
+
+    renderFillerStage();
+    renderFillerInputs();
+  });
+
+  showGuides.addEventListener('change', function () {
+    if (fill.stage) { fill.stage.classList.toggle('guides', showGuides.checked); }
+  });
+
+  function renderFillerStage() {
+    fillerHost.innerHTML = '';
+    fill.stage = null;
+
+    if (!fill.tpl) {
+      fillerHost.innerHTML = placeholderHtml('No template selected',
+        'Pick a saved template on the right to start filling it in.');
+      return;
+    }
+
+    var stage = document.createElement('div');
+    stage.className = 'stage' + (showGuides.checked ? ' guides' : '');
+    stage.style.maxWidth = fill.tpl.imgW + 'px';
+
+    var img = document.createElement('img');
+    img.className = 'bg';
+    img.alt = fill.tpl.name;
+    img.src = fill.tpl.image;
+    stage.appendChild(img);
+
+    fill.stage = stage;
+    fillerHost.appendChild(stage);
+
+    if (img.complete) { paintFillerBoxes(); } else { img.onload = paintFillerBoxes; }
+  }
+
+  function paintFillerBoxes() {
+    if (!fill.stage || !fill.tpl) { return; }
+
+    var old = fill.stage.querySelectorAll('.fbox');
+    for (var i = 0; i < old.length; i++) { old[i].parentNode.removeChild(old[i]); }
+
+    var scale = stageScale(fill.stage, fill.tpl);
+
+    fill.tpl.fields.forEach(function (f) {
+      var box = document.createElement('div');
+      box.className = 'fbox' + (f.type === 'image' ? ' img-field' : '');
+      box.setAttribute('data-id', f.id);
+
+      var value = (f.type === 'image') ? fill.images[f.id] : fill.values[f.id];
+      box.appendChild(buildInner(f, value));
+
+      styleBox(box, f, fill.tpl, scale);
+      fill.stage.appendChild(box);
+    });
+  }
+
+  function refreshFillerBox(id) {
+    if (!fill.stage || !fill.tpl) { return; }
+
+    var f = null;
+    fill.tpl.fields.forEach(function (x) { if (x.id === id) { f = x; } });
+    if (!f) { return; }
+
+    var box = fill.stage.querySelector('.fbox[data-id="' + id + '"]');
+    if (!box) { return; }
+
+    if (f.type === 'text') {
+      var txt = box.querySelector('.txt');
+      if (txt) { txt.textContent = fill.values[id] || ''; }
+      return;
+    }
+
+    // Image masks swap their whole inner layer, since the <img> may be new.
+    box.innerHTML = '';
+    box.appendChild(buildInner(f, fill.images[id]));
+    styleBox(box, f, fill.tpl, stageScale(fill.stage, fill.tpl));
+  }
+
+  function renderFillerInputs() {
+    var host = document.getElementById('fillerFields');
+
+    if (!fill.tpl || !fill.tpl.fields.length) {
+      host.innerHTML = '<p class="none">Nothing to fill in yet.</p>';
+      return;
+    }
+
+    host.innerHTML = '';
+
+    fill.tpl.fields.forEach(function (f) {
+      var wrap = document.createElement('div');
+      wrap.className = 'field';
+
+      var lab = document.createElement('label');
+      lab.className = 'lbl';
+      lab.textContent = (f.type === 'image' ? '🖼 ' : '') + (f.label || 'Field');
+      wrap.appendChild(lab);
+
+      if (f.type === 'image') {
+        wrap.appendChild(buildDropZone(f));
+      } else {
+        var input = f.multi ? document.createElement('textarea') : document.createElement('input');
+        if (!f.multi) { input.type = 'text'; }
+        input.id = 'in_' + f.id;
+        input.value = fill.values[f.id] || '';
+        lab.setAttribute('for', input.id);
+
+        input.addEventListener('input', function () {
+          fill.values[f.id] = input.value;
+          refreshFillerBox(f.id);
+        });
+
+        wrap.appendChild(input);
+      }
+
+      host.appendChild(wrap);
+    });
+  }
+
+  /** Click-or-drop upload target for one image mask field. */
+  function buildDropZone(f) {
+    var zone = document.createElement('div');
+    zone.className = 'drop';
+
+    var file = document.createElement('input');
+    file.type = 'file';
+    file.accept = 'image/*';
+    file.hidden = true;
+
+    function paintZone() {
+      var current = fill.images[f.id];
+      zone.innerHTML = '';
+
+      if (current) {
+        var thumb = document.createElement('img');
+        thumb.className = 'thumb';
+        thumb.src = current;
+        thumb.alt = f.label || 'Uploaded image';
+        zone.appendChild(thumb);
+      }
+
+      var lbl = document.createElement('div');
+      lbl.className = 'dz-label';
+      lbl.textContent = current ? 'Click or drop to replace' : 'Click or drop an image here';
+      zone.appendChild(lbl);
+
+      if (current) {
+        var clr = document.createElement('button');
+        clr.type = 'button';
+        clr.className = 'btn sm';
+        clr.style.marginTop = '8px';
+        clr.textContent = 'Remove';
+        clr.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          delete fill.images[f.id];
+          paintZone();
+          refreshFillerBox(f.id);
+        });
+        zone.appendChild(clr);
+      }
+
+      zone.appendChild(file);
+    }
+
+    function accept(fileObj) {
+      if (!fileObj || !/^image\//.test(fileObj.type)) {
+        toast('That file is not an image.', 'bad');
+        return;
+      }
+
+      var reader = new FileReader();
+      reader.onload = function () {
+        var img = new Image();
+        img.onload = function () {
+          // Downscaled on the way in: mask images are usually photos, and a
+          // full-size one would dwarf everything else the page holds.
+          var s = Math.min(1, UPLOAD_MAX / Math.max(img.naturalWidth, img.naturalHeight));
+          var w = Math.round(img.naturalWidth * s);
+          var h = Math.round(img.naturalHeight * s);
+
+          var c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          c.getContext('2d').drawImage(img, 0, 0, w, h);
+
+          fill.images[f.id] = c.toDataURL('image/jpeg', 0.9);
+          paintZone();
+          refreshFillerBox(f.id);
+        };
+        img.onerror = function () { toast('That image could not be read.', 'bad'); };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(fileObj);
+    }
+
+    zone.addEventListener('click', function () { file.click(); });
+    file.addEventListener('change', function () { accept(file.files && file.files[0]); });
+
+    ['dragenter', 'dragover'].forEach(function (e) {
+      zone.addEventListener(e, function (ev) {
+        ev.preventDefault();
+        zone.classList.add('over');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach(function (e) {
+      zone.addEventListener(e, function (ev) {
+        ev.preventDefault();
+        zone.classList.remove('over');
+      });
+    });
+
+    zone.addEventListener('drop', function (ev) {
+      var dt = ev.dataTransfer;
+      if (dt && dt.files && dt.files[0]) { accept(dt.files[0]); }
+    });
+
+    paintZone();
+    return zone;
+  }
+
+  document.getElementById('clearFill').addEventListener('click', function () {
+    if (!fill.tpl) { return; }
+    fill.cache[fill.tpl.id] = { values: {}, images: {} };
+    fill.values = fill.cache[fill.tpl.id].values;
+    fill.images = fill.cache[fill.tpl.id].images;
+    renderFillerInputs();
+    paintFillerBoxes();
+    toast('All values cleared.');
+  });
+
+  // ===========================================================================
+  // 9. EXPORT
+  // ===========================================================================
+
+  function needTemplate() {
+    if (!fill.tpl || !fill.stage) { toast('Select a template first.', 'bad'); return false; }
+    return true;
+  }
+
+  /** Strip the dotted guides for the duration of a capture, then restore them. */
+  function withoutGuides(fn) {
+    var had = fill.stage.classList.contains('guides');
+    fill.stage.classList.remove('guides');
+
+    var restore = function () { if (had) { fill.stage.classList.add('guides'); } };
+
+    return fontsReady()
+      .then(fn)
+      .then(function (r) { restore(); return r; })
+      .catch(function (err) { restore(); throw err; });
+  }
+
+  /** Wait for webfonts so an export never renders in the fallback face. */
+  function fontsReady() {
+    if (document.fonts && document.fonts.ready) {
+      return document.fonts.ready.catch(function () { return null; });
+    }
+    return Promise.resolve();
+  }
+
+  // ---- PNG -------------------------------------------------------------------
+
+  document.getElementById('expPng').addEventListener('click', function () {
+    if (!needTemplate()) { return; }
+
+    if (typeof window.html2canvas !== 'function') { nativePng(); return; }
+
+    var rect = fill.stage.getBoundingClientRect();
+    // Capture at the background's own resolution rather than the on-screen
+    // size, so output quality does not depend on the browser window.
+    var scale = clamp(fill.tpl.imgW / Math.max(1, rect.width), 1, 4);
+
+    withoutGuides(function () {
+      return window.html2canvas(fill.stage, {
+        scale: scale, backgroundColor: '#ffffff', useCORS: true, logging: false
+      });
+    }).then(function (canvas) {
+      canvas.toBlob(function (blob) {
+        download(blob, safeName(fill.tpl.name) + '.png');
+        toast('PNG exported at ' + canvas.width + '×' + canvas.height + 'px.', 'good');
+      }, 'image/png');
+    }).catch(function () { nativePng(); });
+  });
+
+  function roundRectPath(cx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    cx.beginPath();
+    cx.moveTo(x + r, y);
+    cx.arcTo(x + w, y, x + w, y + h, r);
+    cx.arcTo(x + w, y + h, x, y + h, r);
+    cx.arcTo(x, y + h, x, y, r);
+    cx.arcTo(x, y, x + w, y, r);
+    cx.closePath();
+  }
+
+  function maskPath(cx, f) {
+    if (f.shape === 'circle') {
+      cx.beginPath();
+      cx.ellipse(f.x + f.w / 2, f.y + f.h / 2, f.w / 2, f.h / 2, 0, 0, Math.PI * 2);
+      cx.closePath();
+    } else if (f.shape === 'rounded') {
+      roundRectPath(cx, f.x, f.y, f.w, f.h, f.radius || 0);
+    } else {
+      cx.beginPath();
+      cx.rect(f.x, f.y, f.w, f.h);
+      cx.closePath();
+    }
+  }
+
+  /** Where a source image lands inside a frame for a given fit mode. */
+  function fitRect(iw, ih, bx, by, bw, bh, mode) {
+    if (mode === 'stretch') { return { x: bx, y: by, w: bw, h: bh }; }
+    var s = (mode === 'contain') ? Math.min(bw / iw, bh / ih) : Math.max(bw / iw, bh / ih);
+    var w = iw * s, h = ih * s;
+    return { x: bx + (bw - w) / 2, y: by + (bh - h) / 2, w: w, h: h };
+  }
+
+  /**
+   * Built-in PNG writer used when html2canvas is missing or fails. Draws the
+   * background, every text field (with wrapping) and every image mask (with
+   * shape clipping and fit maths) straight onto a full-resolution canvas.
+   */
+  function nativePng() {
+    var tpl = fill.tpl;
+    var c = document.createElement('canvas');
+    c.width = tpl.imgW;
+    c.height = tpl.imgH;
+    var cx = c.getContext('2d');
+
+    var bg = new Image();
+
+    bg.onload = function () {
+      cx.fillStyle = '#ffffff';
+      cx.fillRect(0, 0, c.width, c.height);
+      cx.drawImage(bg, 0, 0, c.width, c.height);
+
+      // Image masks first, so text can be laid over a photo if they overlap.
+      var pending = [];
+
+      tpl.fields.forEach(function (f) {
+        if (f.type !== 'image' || !fill.images[f.id]) { return; }
+
+        pending.push(new Promise(function (resolve) {
+          var im = new Image();
+          im.onload = function () {
+            cx.save();
+            maskPath(cx, f);
+            cx.clip();
+
+            var r = fitRect(im.naturalWidth, im.naturalHeight, f.x, f.y, f.w, f.h, f.fit);
+            cx.drawImage(im, r.x, r.y, r.w, r.h);
+            cx.restore();
+
+            if (f.strokeWidth > 0) {
+              cx.save();
+              maskPath(cx, f);
+              cx.lineWidth = f.strokeWidth;
+              cx.strokeStyle = f.strokeColor;
+              cx.stroke();
+              cx.restore();
+            }
+            resolve();
+          };
+          im.onerror = function () { resolve(); };
+          im.src = fill.images[f.id];
+        }));
+      });
+
+      Promise.all(pending).then(function () {
+        tpl.fields.forEach(function (f) {
+          if (f.type !== 'text') { return; }
+
+          var text = fill.values[f.id];
+          if (!text) { return; }
+
+          cx.save();
+          cx.beginPath();
+          cx.rect(f.x, f.y, f.w, f.h);
+          cx.clip();
+
+          cx.fillStyle = f.color;
+          cx.textBaseline = 'top';
+          cx.textAlign = f.align === 'center' ? 'center' : (f.align === 'right' ? 'right' : 'left');
+          cx.font = f.weight + ' ' + f.size + 'px ' + fontStack(f.font || tpl.fontFamily);
+
+          var anchor = f.align === 'center' ? f.x + f.w / 2 : (f.align === 'right' ? f.x + f.w : f.x);
+          var lineH = f.size * 1.25;
+          var y = f.y;
+
+          String(text).split('\n').forEach(function (para) {
+            var line = '';
+            para.split(' ').forEach(function (word) {
+              var test = line ? (line + ' ' + word) : word;
+              if (cx.measureText(test).width > f.w && line) {
+                cx.fillText(line, anchor, y);
+                y += lineH;
+                line = word;
+              } else {
+                line = test;
+              }
+            });
+            cx.fillText(line, anchor, y);
+            y += lineH;
+          });
+
+          cx.restore();
+        });
+
+        c.toBlob(function (blob) {
+          download(blob, safeName(tpl.name) + '.png');
+          toast('PNG exported with the built-in renderer.', 'good');
+        }, 'image/png');
+      });
+    };
+
+    bg.onerror = function () { toast('The background could not be redrawn.', 'bad'); };
+    bg.src = tpl.image;
+  }
+
+  // ---- PDF -------------------------------------------------------------------
+
+  document.getElementById('expPdf').addEventListener('click', function () {
+    if (!needTemplate()) { return; }
+
+    if (typeof window.html2pdf !== 'function') {
+      toast('PDF export needs html2pdf, which did not load. Export PNG instead.', 'bad');
+      return;
+    }
+
+    var rect = fill.stage.getBoundingClientRect();
+    var w = Math.round(rect.width);
+    var h = Math.round(rect.height);
+
+    withoutGuides(function () {
+      return window.html2pdf().set({
+        margin: 0,
+        filename: safeName(fill.tpl.name) + '.pdf',
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', logging: false },
+        // px units plus the px_scaling hotfix keep the page exactly the shape
+        // of the captured element — one page, no letterboxing, no crop.
+        jsPDF: {
+          unit: 'px',
+          format: [w, h],
+          orientation: w > h ? 'landscape' : 'portrait',
+          hotfixes: ['px_scaling']
+        }
+      }).from(fill.stage).save();
+    }).then(function () {
+      toast('PDF exported.', 'good');
+    }).catch(function () {
+      toast('The PDF could not be generated.', 'bad');
+    });
+  });
+
+  // ---- data ------------------------------------------------------------------
+
+  document.getElementById('expJson').addEventListener('click', function () {
+    if (!needTemplate()) { return; }
+
+    var data = {}, images = {};
+
+    fill.tpl.fields.forEach(function (f) {
+      var name = f.label || f.id;
+      if (f.type === 'image') {
+        images[name] = fill.images[f.id] || null;
+        data[name] = fill.images[f.id] ? '[image attached]' : '';
+      } else {
+        data[name] = fill.values[f.id] || '';
+      }
+    });
+
+    var payload = {
+      template: fill.tpl.name,
+      templateId: fill.tpl.id,
+      generatedAt: new Date().toISOString(),
+      fieldCount: fill.tpl.fields.length,
+      data: data,
+      images: images        // data URLs, so the export is a complete record
+    };
+
+    download(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
+             safeName(fill.tpl.name) + '.json');
+    toast('JSON exported.', 'good');
+  });
+
+  document.getElementById('expTxt').addEventListener('click', function () {
+    if (!needTemplate()) { return; }
+
+    var lines = [];
+    lines.push(fill.tpl.name);
+    lines.push(new Array(fill.tpl.name.length + 1).join('='));
+    lines.push('Generated: ' + new Date().toLocaleString());
+    lines.push('Fields:    ' + fill.tpl.fields.length);
+    lines.push('');
+
+    fill.tpl.fields.forEach(function (f) {
+      var label = f.label || 'Field';
+      if (f.type === 'image') {
+        lines.push(label + ': ' + (fill.images[f.id] ? '[image attached]' : '[no image]'));
+      } else {
+        lines.push(label + ': ' + (fill.values[f.id] || ''));
+      }
+    });
+
+    download(new Blob([lines.join('\r\n')], { type: 'text/plain' }),
+             safeName(fill.tpl.name) + '.txt');
+    toast('TXT exported.', 'good');
+  });
+
+  // ===========================================================================
+  // 10. MODES, RESIZE, BOOT
+  // ===========================================================================
+
+  var viewEditor = document.getElementById('viewEditor');
+  var viewFiller = document.getElementById('viewFiller');
+  var tabEditor = document.getElementById('tabEditor');
+  var tabFiller = document.getElementById('tabFiller');
+
+  function setMode(mode) {
+    var editing = (mode === 'editor');
+
+    viewEditor.hidden = !editing;
+    viewFiller.hidden = editing;
+    tabEditor.className = editing ? 'on' : '';
+    tabFiller.className = editing ? '' : 'on';
+
+    if (editing) {
+      renderTemplateList();
+      if (ed.stage) { paintBoxes(); }
+      return;
+    }
+
+    // The editor may have just saved changes to the template on screen.
+    refreshFillerSelect();
+
+    if (fill.tpl) {
+      var list = loadTemplates();
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === fill.tpl.id) {
+          fill.tpl = list[i];
+          fill.tpl.fields = fill.tpl.fields.map(normaliseField);
+        }
+      }
+      renderFillerStage();
+      renderFillerInputs();
+    }
+  }
+
+  tabEditor.addEventListener('click', function () { setMode('editor'); });
+  tabFiller.addEventListener('click', function () { setMode('filler'); });
+
+  // Geometry is percentage-based and rescales itself, but font size and border
+  // width are converted from source pixels and must be recomputed on resize.
+  var resizeTimer = null;
+  window.addEventListener('resize', function () {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(function () {
+      if (ed.stage) { paintBoxes(); }
+      if (fill.stage) { paintFillerBoxes(); }
+    }, 120);
+  });
+
+  window.addEventListener('load', function () {
+    var missing = [];
+    if (!window.pdfjsLib) { missing.push('pdf.js'); }
+    if (typeof window.html2canvas !== 'function') { missing.push('html2canvas'); }
+    if (typeof window.html2pdf !== 'function') { missing.push('html2pdf'); }
+
+    document.getElementById('libNote').textContent = missing.length
+      ? 'Not loaded: ' + missing.join(', ') + '. PNG still works via the built-in renderer; PDF export and PDF backgrounds need their libraries.'
+      : 'pdf.js, html2canvas and html2pdf all loaded.';
+
+    if (!window.pdfjsLib) {
+      document.getElementById('bgNote').textContent =
+        'PNG, JPG and WEBP load directly. PDF support is unavailable — pdf.js did not load.';
+    }
+  });
+
+  renderEditorStage();
+  renderProps();
+  renderFieldList();
+  renderTemplateList();
+  refreshFillerSelect();
+})();
+</script>
+
+</body>
+</html>
